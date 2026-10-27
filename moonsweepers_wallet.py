@@ -41,11 +41,31 @@ def decode(payload, off):
     return lo | (mid << 32) | (hi << 64), flags
 
 
+def find_wallets(payload, dollars):
+    """Find System.Decimal values (any valid scale) that match slot.json's dollars.
+
+    Candidates right after a b'\\x04team' marker win; otherwise every match in the payload is returned.
+    """
+    data = bytes(payload)
+    found = []
+    for off in range(0, len(data) - 15):
+        lo, mid, hi, flags = struct.unpack_from('<4I', data, off)
+        scale = (flags >> 16) & 0xFF
+        if flags & ~(0x1F << 16) or scale > 28:
+            continue
+        mant = lo | (mid << 32) | (hi << 64)
+        if mant and abs(float(Decimal(mant) / Decimal(10) ** scale) - dollars) <= 1.0:
+            found.append((off, mant, scale))
+    marked = [c for c in found if data[max(0, c[0] - 5):c[0]] == b'\x04team']
+    return marked or found
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument('slot_dir')
     ap.add_argument('--add', default='1000')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--diagnose', action='store_true', help='print wallet candidates and team markers')
     a = ap.parse_args(argv)
 
     slot = Path(a.slot_dir).expanduser()
@@ -57,27 +77,26 @@ def main(argv=None):
     sp = sessions[0]
     payload = read_session(sp)
 
-    cands = []
-    for m in re.finditer(rb'\x04team', bytes(payload)):
-        off = m.end()
-        if off + 16 > len(payload):
-            continue
-        mant, flags = decode(payload, off)
-        if flags == FLAGS:
-            cands.append((off, mant))
+    cands = find_wallets(payload, meta['dollars'])
+    if a.diagnose or len(cands) != 1:
+        print(f'slot.json dollars: {meta["dollars"]}; payload {len(payload)} bytes; '
+              f'{len(cands)} wallet candidate(s):')
+        for off, mant, scale in cands:
+            print(f'  offset {off} scale {scale} -> ${Decimal(mant) / Decimal(10) ** scale}  '
+                  f'ctx={bytes(payload[max(0, off - 12):off])!r}')
+        for m in re.finditer(rb'\x04team', bytes(payload)):
+            print(f'  team marker at {m.start()}; next 16 bytes: {bytes(payload[m.end():m.end() + 16]).hex()}')
     if len(cands) != 1:
         sys.exit(f'Expected exactly one wallet record, found {len(cands)}. Nothing changed.')
-    off, mant = cands[0]
-    cur = Decimal(mant) / Decimal(10) ** SCALE
+    off, mant, scale = cands[0]
+    cur = Decimal(mant) / Decimal(10) ** scale
     print(f'Wallet at offset {off}: ${cur}   (slot.json says {meta["dollars"]})')
-    if abs(float(cur) - meta['dollars']) > 1.0:
-        print('Warning: wallet differs from slot.json by more than $1 (slot.json may be stale).')
 
-    add = int(Decimal(a.add) * Decimal(10) ** SCALE)
+    add = int(Decimal(a.add) * Decimal(10) ** scale)
     new = mant + add
     if not (0 <= new < 1 << 96):
         sys.exit('Resulting amount out of range.')
-    print(f'New wallet: ${Decimal(new) / Decimal(10) ** SCALE}')
+    print(f'New wallet: ${Decimal(new) / Decimal(10) ** scale}')
     if a.dry_run:
         print('Dry run. Nothing written.')
         return
@@ -86,7 +105,7 @@ def main(argv=None):
     for f in (sp, sj):
         shutil.copy2(f, f.with_name(f.name + '.pre-wallet'))
     write_session(sp, payload)
-    meta['dollars'] = float(Decimal(new) / Decimal(10) ** SCALE)
+    meta['dollars'] = float(Decimal(new) / Decimal(10) ** scale)
     sj.write_text(json.dumps(meta, separators=(',', ':')))
     read_session(sp)  # re-validate
     print('Written. Backups: *.pre-wallet')
