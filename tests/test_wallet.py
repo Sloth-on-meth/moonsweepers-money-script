@@ -1,0 +1,45 @@
+import json, sys, tempfile, unittest
+from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import moonsweepers_wallet as w
+
+
+def make_slot(root, dollars):
+    slot = Path(root) / 'slot-1'
+    (slot / 'abc123').mkdir(parents=True)
+    mant = int(Decimal(dollars) * Decimal(10) ** w.SCALE)
+    wallet = (mant.to_bytes(12, 'little')) + w.FLAGS.to_bytes(4, 'little')
+    w.write_session(slot / 'abc123' / 'session.moon', b'header\x04team' + wallet + b'tail')
+    (slot / 'slot.json').write_text(json.dumps({'dollars': float(dollars)}))
+    return slot
+
+
+def wallet_of(slot):
+    p = w.read_session(next(slot.glob('*/session.moon')))
+    off = p.index(b'\x04team') + 5
+    mant, flags = w.decode(p, off)
+    assert flags == w.FLAGS
+    return Decimal(mant) / Decimal(10) ** w.SCALE
+
+
+class WalletTest(unittest.TestCase):
+    def test_add(self):
+        with tempfile.TemporaryDirectory() as d:
+            slot = make_slot(d, '2500.5')
+            w.main([str(slot), '--add', '1000'])
+            self.assertEqual(wallet_of(slot), Decimal('3500.5'))
+            self.assertEqual(json.loads((slot / 'slot.json').read_text())['dollars'], 3500.5)
+            self.assertTrue((slot / 'slot.json.pre-wallet').exists())
+            self.assertTrue(next(slot.glob('*/session.moon.pre-wallet')).exists())
+
+    def test_dry_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            slot = make_slot(d, '10')
+            w.main([str(slot), '--dry-run'])
+            self.assertEqual(wallet_of(slot), Decimal('10'))
+
+
+if __name__ == '__main__':
+    unittest.main()
