@@ -94,14 +94,21 @@ def main(argv=None):
 
     add = int(Decimal(a.add) * Decimal(10) ** scale)
     new = mant + add
-    if not (0 <= new < 1 << 96):
+    if new < 0:
         sys.exit('Resulting amount out of range.')
-    print(f'New wallet: ${Decimal(new) / Decimal(10) ** scale}')
+    # A System.Decimal has a 96-bit mantissa, so at a high scale the wallet tops out low
+    # (scale 24 -> ~$79k). Drop trailing sub-cent digits (lower the scale) until it fits.
+    while new >= 1 << 96 and scale > 0:
+        new //= 10
+        scale -= 1
+    if new >= 1 << 96:
+        sys.exit('Resulting amount out of range.')
+    print(f'New wallet: ${Decimal(new) / Decimal(10) ** scale} (scale {scale})')
     if a.dry_run:
         print('Dry run. Nothing written.')
         return
 
-    struct.pack_into('<3I', payload, off, new & 0xFFFFFFFF, (new >> 32) & 0xFFFFFFFF, new >> 64)
+    struct.pack_into('<4I', payload, off, new & 0xFFFFFFFF, (new >> 32) & 0xFFFFFFFF, new >> 64, scale << 16)
     for f in (sp, sj):
         shutil.copy2(f, f.with_name(f.name + '.pre-wallet'))
     write_session(sp, payload)
